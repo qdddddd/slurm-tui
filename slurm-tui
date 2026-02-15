@@ -1,0 +1,472 @@
+#!/usr/bin/env python3
+"""Slurm TUI monitor using rich library."""
+
+import subprocess
+import time
+import sys
+import os
+import glob
+import select
+import termios
+import tty
+import readline  # enables line editing for input()
+from datetime import datetime
+from rich.console import Console
+from rich.table import Table
+from rich.layout import Layout
+from rich.panel import Panel
+from rich.live import Live
+from rich.text import Text
+from rich.prompt import Prompt, Confirm
+from rich.columns import Columns
+from rich import box
+
+REFRESH_INTERVAL = 2  # seconds
+CURRENT_CWD = os.getcwd()  # Track working directory for job submission
+
+
+def run_cmd(cmd: list[str]) -> str:
+    """Run command and return output."""
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+        return result.stdout.strip()
+    except Exception as e:
+        return f"Error: {e}"
+
+
+def get_jobs_table() -> Table:
+    """Get job queue as a rich table."""
+    table = Table(title="Job Queue", expand=True, box=box.SIMPLE_HEAD, padding=(0, 1))
+    table.add_column("JobID", style="cyan", no_wrap=True)
+    table.add_column("User", style="green")
+    table.add_column("Name", style="white")
+    table.add_column("Part", style="yellow")
+    table.add_column("State", style="bold")
+    table.add_column("Time", style="magenta")
+    table.add_column("N", style="white")
+    table.add_column("NodeList", style="dim", no_wrap=True)
+
+    output = run_cmd(["squeue", "-h", "-o", "%i|%u|%j|%P|%T|%M|%D|%R"])
+    if output and not output.startswith("Error"):
+        for line in output.split("\n"):
+            if line.strip():
+                parts = line.split("|")
+                if len(parts) >= 8:
+                    state = parts[4]
+                    state_style = {
+                        "RUNNING": "green",
+                        "PENDING": "yellow",
+                        "COMPLETING": "cyan",
+                        "FAILED": "red",
+                        "CANCELLED": "red",
+                    }.get(state, "white")
+                    parts[4] = f"[{state_style}]{state}[/]"
+                    # Shorten long reason strings in NodeList column
+                    reason = parts[7]
+                    if reason.startswith("("):
+                        reason = reason.strip("()")
+                        if "ReqNodeNotAvail" in reason:
+                            reason = "NodeNA"
+                        elif "Resources" in reason:
+                            reason = "Rsrc"
+                        elif "Priority" in reason:
+                            reason = "Prio"
+                        elif "Dependency" in reason:
+                            reason = "Dep"
+                        elif "QOSMax" in reason:
+                            reason = "QOS"
+                        else:
+                            reason = reason[:8]
+                    parts[7] = reason
+                    table.add_row(*parts[:8])
+    elif not output:
+        table.add_row("", "", "[dim]No jobs in queue[/]", "", "", "", "", "")
+
+    return table
+
+
+def get_nodes_table() -> Table:
+    """Get node status as a rich table."""
+    table = Table(title="Cluster Status", expand=True, box=box.SIMPLE_HEAD, padding=(0, 1))
+    table.add_column("Part", style="cyan")
+    table.add_column("Av", style="green")
+    table.add_column("N", style="white", justify="right")
+    table.add_column("State", style="bold")
+    table.add_column("NodeList", style="dim")
+
+    output = run_cmd(["sinfo", "-h", "-o", "%P|%a|%D|%t|%N"])
+    if output and not output.startswith("Error"):
+        for line in output.split("\n"):
+            if line.strip():
+                parts = line.split("|")
+                if len(parts) >= 5:
+                    state = parts[3]
+                    state_style = {
+                        "idle": "green",
+                        "mix": "yellow", 
+                        "alloc": "cyan",
+                        "down": "red",
+                        "drain": "red",
+                    }.get(state, "white")
+                    parts[3] = f"[{state_style}]{state}[/]"
+                    table.add_row(*parts[:5])
+
+    return table
+
+
+def get_running_jobs_detail() -> Panel:
+    """Get detailed info for running jobs."""
+    # Get running job IDs
+    output = run_cmd(["squeue", "-h", "-t", "RUNNING", "-o", "%i|%u"])
+    if not output or output.startswith("Error"):
+        return Panel("[dim]No running jobs[/]", title="Running Job Details", border_style="cyan")
+    
+    job_entries = [j.strip().split("|") for j in output.split("\n") if j.strip()]
+    if not job_entries:
+        return Panel("[dim]No running jobs[/]", title="Running Job Details", border_style="cyan")
+    
+    # Sort: current user's jobs first
+    current_user = os.environ.get("USER", "")
+    job_entries.sort(key=lambda x: (0 if len(x) > 1 and x[1] == current_user else 1))
+    job_ids = [e[0] for e in job_entries]
+    
+    job_texts = []
+    for job_id in job_ids[:6]:  # Limit to 6 jobs for 2-column layout
+        # Get job details
+        detail = run_cmd(["scontrol", "show", "job", job_id])
+        if detail.startswith("Error"):
+            continue
+        
+        # Parse key fields
+        fields = {}
+        for part in detail.replace("\n", " ").split():
+            if "=" in part:
+                key, _, val = part.partition("=")
+                fields[key] = val
+        
+        name = fields.get("JobName", "N/A")
+        user = fields.get("UserId", "N/A").split("(")[0]
+        node = fields.get("NodeList", "N/A")
+        elapsed = fields.get("RunTime", "N/A")
+        timelimit = fields.get("TimeLimit", "N/A")
+        cpus = fields.get("NumCPUs", "N/A")
+        mem = fields.get("MinMemoryNode", fields.get("MinMemoryCPU", "N/A"))
+        stdout = fields.get("StdOut", "N/A")
+        
+        text = Text()
+        text.append(f"Job {job_id}", style="bold cyan")
+        text.append(f" - {name[:20]}\n", style="white")
+        text.append(f"User: ", style="dim")
+        text.append(f"{user}", style="green")
+        text.append(f"  Node: ", style="dim")
+        text.append(f"{node}\n", style="yellow")
+        text.append(f"Time: ", style="dim")
+        text.append(f"{elapsed}", style="magenta")
+        text.append(f" / {timelimit}\n", style="dim")
+        text.append(f"CPUs: ", style="dim")
+        text.append(f"{cpus}", style="cyan")
+        text.append(f"  Mem: ", style="dim")
+        text.append(f"{mem}\n", style="cyan")
+        
+        # Show last few lines of stdout if accessible
+        if stdout != "N/A" and stdout:
+            # Show shortened path - keep more characters
+            short_path = stdout if len(stdout) <= 120 else "..." + stdout[-117:]
+            text.append(f"Log: ", style="dim")
+            text.append(f"{short_path}\n", style="dim white")
+            tail = run_cmd(["tail", "-3", stdout])
+            if tail and not tail.startswith("Error"):
+                for line in tail.split("\n")[-3:]:
+                    text.append(f"  {line[:120]}\n", style="dim white")
+        
+        job_texts.append(text)
+    
+    if not job_texts:
+        return Panel("[dim]No running jobs[/]", title="Running Job Details", border_style="cyan")
+    
+    # Use 2 columns max if we have multiple jobs
+    if len(job_texts) >= 2:
+        # Split into left and right columns
+        left_texts = Text()
+        right_texts = Text()
+        for i, t in enumerate(job_texts):
+            if i % 2 == 0:
+                left_texts.append_text(t)
+                left_texts.append("\n")
+            else:
+                right_texts.append_text(t)
+                right_texts.append("\n")
+        content = Columns([left_texts, right_texts], equal=True, expand=True)
+    else:
+        content = job_texts[0]
+    
+    title = f"Running Job Details ({len(job_ids)})"
+    if len(job_ids) > 6:
+        title += f" - showing 6 of {len(job_ids)}"
+    
+    return Panel(content, title=title, border_style="cyan")
+
+
+def get_summary() -> Panel:
+    """Get cluster summary stats."""
+    # Get job counts
+    output = run_cmd(["squeue", "-h", "-o", "%T"])
+    states = output.split("\n") if output else []
+    running = sum(1 for s in states if s == "RUNNING")
+    pending = sum(1 for s in states if s == "PENDING")
+    
+    # Get node counts
+    output = run_cmd(["sinfo", "-h", "-o", "%t"])
+    node_states = output.split("\n") if output else []
+    idle = sum(1 for s in node_states if s == "idle")
+    mixed = sum(1 for s in node_states if s == "mix")
+    alloc = sum(1 for s in node_states if s == "alloc")
+    
+    text = Text()
+    text.append("Jobs: ", style="bold")
+    text.append(f"{running} running", style="green")
+    text.append(" | ")
+    text.append(f"{pending} pending", style="yellow")
+    text.append("    Nodes: ", style="bold")
+    text.append(f"{idle} idle", style="green")
+    text.append(" | ")
+    text.append(f"{mixed} mixed", style="yellow")
+    text.append(" | ")
+    text.append(f"{alloc} alloc", style="cyan")
+    text.append(f"    Updated: {datetime.now().strftime('%H:%M:%S')}", style="dim")
+    text.append("    ")
+    text.append("s", style="bold white")
+    text.append(":submit ", style="dim")
+    text.append("c", style="bold white")
+    text.append(":cancel ", style="dim")
+    text.append("d", style="bold white")
+    text.append(":chdir ", style="dim")
+    text.append("q", style="bold white")
+    text.append(":quit", style="dim")
+    
+    return Panel(text, title=f"cwd: {CURRENT_CWD}", border_style="white")
+
+
+def make_layout() -> Layout:
+    """Create the layout."""
+    layout = Layout()
+    layout.split_column(
+        Layout(name="summary", size=3),
+        Layout(name="upper", size=12),
+        Layout(name="lower"),
+    )
+    layout["upper"].split_row(
+        Layout(name="jobs", ratio=3),
+        Layout(name="separator", size=1),
+        Layout(name="nodes", ratio=2),
+    )
+    layout["lower"].update(Layout(name="details"))
+    return layout
+
+
+def path_completer(text, state):
+    """Complete file and directory paths."""
+    if text.startswith('~'):
+        text = os.path.expanduser(text)
+    
+    if '*' not in text:
+        text += '*'
+    
+    matches = glob.glob(text)
+    # Add trailing slash for directories
+    matches = [m + '/' if os.path.isdir(m) else m for m in matches]
+    
+    try:
+        return matches[state]
+    except IndexError:
+        return None
+
+
+def setup_readline():
+    """Configure readline for path completion."""
+    readline.set_completer(path_completer)
+    readline.set_completer_delims(' \t\n;')
+    readline.parse_and_bind('tab: complete')
+
+
+def change_cwd(console: Console) -> bool:
+    """Change working directory for job submission."""
+    global CURRENT_CWD
+    console.clear()
+    console.print("\n[bold yellow]Change Working Directory[/]\n")
+    console.print(f"Current: [cyan]{CURRENT_CWD}[/]\n")
+    
+    # Reset terminal to sane state for proper readline support
+    os.system('stty sane')
+    setup_readline()
+    
+    try:
+        new_dir = input("Enter new directory (or 'q' to cancel): ")
+    except (EOFError, KeyboardInterrupt):
+        return False
+    
+    if not new_dir.strip() or new_dir.strip().lower() == 'q':
+        return False
+    
+    new_dir = os.path.expanduser(new_dir.strip())
+    
+    if os.path.isdir(new_dir):
+        CURRENT_CWD = os.path.abspath(new_dir)
+        console.print(f"\n[green]Changed to: {CURRENT_CWD}[/]")
+    else:
+        console.print(f"\n[red]Error: Directory does not exist: {new_dir}[/]")
+    
+    input("\nPress Enter to continue")
+    return True
+
+
+def submit_job(console: Console) -> str | None:
+    """Interactive job submission dialog."""
+    global CURRENT_CWD
+    console.clear()
+    console.print("\n[bold cyan]Submit Job[/]\n")
+    console.print(f"Working directory: [cyan]{CURRENT_CWD}[/]\n")
+    
+    # Reset terminal to sane state for proper readline support
+    os.system('stty sane')
+    setup_readline()
+    
+    try:
+        cmd_str = input("Enter sbatch command (or 'q' to cancel): ")
+    except (EOFError, KeyboardInterrupt):
+        return None
+    
+    if not cmd_str.strip() or cmd_str.strip().lower() == 'q':
+        return None
+    
+    cmd = cmd_str.strip().split()
+    if cmd[0] != "sbatch":
+        cmd = ["sbatch"] + cmd
+    
+    console.print(f"\n[dim]Running: {' '.join(cmd)} (in {CURRENT_CWD})[/]\n")
+    
+    result = subprocess.run(cmd, capture_output=True, text=True, cwd=CURRENT_CWD)
+    if result.returncode == 0:
+        console.print(f"[green]{result.stdout.strip()}[/]")
+    else:
+        console.print(f"[red]Error: {result.stderr.strip()}[/]")
+    
+    input("\nPress Enter to continue")
+    return result.stdout.strip() if result.returncode == 0 else None
+
+
+def cancel_job(console: Console) -> bool:
+    """Interactive job cancellation dialog."""
+    console.clear()
+    console.print("\n[bold red]Cancel Job[/]\n")
+    
+    # Reset terminal to sane state for proper readline support
+    os.system('stty sane')
+    
+    # Show current jobs
+    output = run_cmd(["squeue", "-u", os.environ.get("USER", ""), "-h", "-o", "%i %j %T"])
+    if not output or output.startswith("Error"):
+        console.print("[dim]No jobs to cancel[/]")
+        input("\nPress Enter to continue")
+        return False
+    
+    console.print("Your jobs:")
+    for line in output.split("\n"):
+        if line.strip():
+            parts = line.split()
+            job_id, name, state = parts[0], parts[1] if len(parts) > 1 else "?", parts[2] if len(parts) > 2 else "?"
+            state_style = {"RUNNING": "green", "PENDING": "yellow"}.get(state, "white")
+            console.print(f"  [cyan]{job_id}[/] - {name} [{state_style}]{state}[/]")
+    
+    console.print()
+    try:
+        job_id = input("Enter JobID to cancel (or 'all' for all jobs, 'q' to cancel): ")
+    except (EOFError, KeyboardInterrupt):
+        return False
+    
+    if not job_id.strip() or job_id.lower() == "q":
+        return False
+    
+    if job_id.lower() == "all":
+        confirm = input("Cancel ALL your jobs? (y/N): ")
+        if confirm.lower() != 'y':
+            return False
+        cmd = ["scancel", "-u", os.environ.get("USER", "")]
+    else:
+        cmd = ["scancel", job_id.strip()]
+    
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode == 0:
+        console.print(f"[green]Job(s) cancelled[/]")
+    else:
+        console.print(f"[red]Error: {result.stderr.strip()}[/]")
+    
+    input("\nPress Enter to continue")
+    return result.returncode == 0
+
+
+def check_key() -> str | None:
+    """Non-blocking key check."""
+    if select.select([sys.stdin], [], [], 0)[0]:
+        return sys.stdin.read(1)
+    return None
+
+
+def main():
+    console = Console()
+    layout = make_layout()
+    
+    # Check if we have a proper terminal
+    is_tty = sys.stdin.isatty()
+    old_settings = None
+    
+    try:
+        if is_tty:
+            old_settings = termios.tcgetattr(sys.stdin)
+            tty.setcbreak(sys.stdin.fileno())
+        
+        with Live(layout, console=console, refresh_per_second=1, screen=True) as live:
+            while True:
+                layout["summary"].update(get_summary())
+                layout["jobs"].update(get_jobs_table())
+                layout["separator"].update(Text("│\n" * 20, style="dim"))
+                layout["nodes"].update(get_nodes_table())
+                layout["lower"].update(get_running_jobs_detail())
+                
+                # Check for key press
+                if is_tty:
+                    key = check_key()
+                    if key:
+                        if key.lower() == 'q':
+                            break
+                        elif key.lower() == 's':
+                            live.stop()
+                            termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_settings)
+                            submit_job(console)
+                            tty.setcbreak(sys.stdin.fileno())
+                            live.start()
+                        elif key.lower() == 'c':
+                            live.stop()
+                            termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_settings)
+                            cancel_job(console)
+                            tty.setcbreak(sys.stdin.fileno())
+                            live.start()
+                        elif key.lower() == 'd':
+                            live.stop()
+                            termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_settings)
+                            change_cwd(console)
+                            tty.setcbreak(sys.stdin.fileno())
+                            live.start()
+                
+                time.sleep(REFRESH_INTERVAL)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        if is_tty and old_settings:
+            termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_settings)
+        console.print("\n[yellow]Exiting...[/]")
+        sys.exit(0)
+
+
+if __name__ == "__main__":
+    main()
