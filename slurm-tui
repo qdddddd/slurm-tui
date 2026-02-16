@@ -24,6 +24,40 @@ from rich import box
 REFRESH_INTERVAL = 2  # seconds
 CURRENT_CWD = os.getcwd()  # Track working directory for job submission
 MAX_WORKERS = 8  # Thread pool size for parallel subprocess calls
+HISTORY_PATH = os.path.expanduser("~/.local/cache/slurm-tui-history")
+HISTORY_MAX = 100  # max entries per dialog
+INPUT_HISTORY: dict[str, list[str]] = {}  # Per-dialog command history
+
+
+def _load_history():
+    """Load input history from disk."""
+    if not os.path.isfile(HISTORY_PATH):
+        return
+    try:
+        with open(HISTORY_PATH) as f:
+            section = None
+            for line in f:
+                line = line.rstrip("\n")
+                if line.startswith("[") and line.endswith("]"):
+                    section = line[1:-1]
+                    INPUT_HISTORY.setdefault(section, [])
+                elif section is not None and line:
+                    INPUT_HISTORY[section].append(line)
+    except OSError:
+        pass
+
+
+def _save_history():
+    """Persist input history to disk."""
+    try:
+        os.makedirs(os.path.dirname(HISTORY_PATH), exist_ok=True)
+        with open(HISTORY_PATH, "w") as f:
+            for section, entries in INPUT_HISTORY.items():
+                f.write(f"[{section}]\n")
+                for entry in entries[-HISTORY_MAX:]:
+                    f.write(entry + "\n")
+    except OSError:
+        pass
 
 # Gruvbox palette — set by init_palette()
 GRV_FG     = ""
@@ -463,6 +497,27 @@ def read_input(layout: Layout, live: Live, title: str, prompt: str,
     tab_index = -1
     tab_prefix = ""
 
+    # Command history for this dialog
+    history = INPUT_HISTORY.setdefault(title, [])
+    hist_index = len(history)  # points past the end = current (new) input
+    saved_buf = ""  # saves the in-progress input when browsing history
+
+    def _hist_up():
+        nonlocal buf, hist_index, saved_buf
+        if not history or hist_index <= 0:
+            return
+        if hist_index == len(history):
+            saved_buf = buf  # save current input before navigating
+        hist_index -= 1
+        buf = history[hist_index]
+
+    def _hist_down():
+        nonlocal buf, hist_index, saved_buf
+        if hist_index >= len(history):
+            return
+        hist_index += 1
+        buf = history[hist_index] if hist_index < len(history) else saved_buf
+
     try:
         while True:
             panel = _build_float(title, prompt, buf, body_lines=body_lines,
@@ -481,15 +536,20 @@ def read_input(layout: Layout, live: Live, title: str, prompt: str,
                     seq = sys.stdin.read(1)
                     if seq == "[" and select.select([sys.stdin], [], [], 0.02)[0]:
                         arrow = sys.stdin.read(1)
-                        if tab_matches:
-                            if arrow == "A":  # Up
+                        if arrow == "A":  # Up
+                            if tab_matches:
                                 tab_index = (tab_index - 1) % len(tab_matches)
                                 buf = tab_prefix + tab_matches[tab_index]
-                                continue
-                            elif arrow == "B":  # Down
+                            else:
+                                _hist_up()
+                            continue
+                        elif arrow == "B":  # Down
+                            if tab_matches:
                                 tab_index = (tab_index + 1) % len(tab_matches)
                                 buf = tab_prefix + tab_matches[tab_index]
-                                continue
+                            else:
+                                _hist_down()
+                            continue
                         # Consume remaining escape chars
                         while select.select([sys.stdin], [], [], 0.02)[0]:
                             sys.stdin.read(1)
@@ -501,12 +561,26 @@ def read_input(layout: Layout, live: Live, title: str, prompt: str,
                 # Bare Escape — cancel
                 return None
 
+            # Ctrl-P — history up
+            if ch == "\x10":
+                if not tab_matches:
+                    _hist_up()
+                continue
+
+            # Ctrl-N — history down
+            if ch == "\x0e":
+                if not tab_matches:
+                    _hist_down()
+                continue
+
             # Enter — accept selection or submit
             if ch in ("\r", "\n"):
                 if tab_matches:
                     # Accept current selection and close dropdown
                     tab_matches, tab_index = [], -1
                     continue
+                if buf.strip():
+                    history.append(buf)
                 return buf
 
             # Backspace
@@ -693,6 +767,7 @@ def main():
                         help="Use dark background theme (default: light)")
     args = parser.parse_args()
     init_palette("dark" if args.dark else "light")
+    _load_history()
 
     console = Console()
     layout = make_layout()
@@ -739,6 +814,7 @@ def main():
     except KeyboardInterrupt:
         pass
     finally:
+        _save_history()
         console.show_cursor(True)
         if is_tty and old_settings:
             termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_settings)
