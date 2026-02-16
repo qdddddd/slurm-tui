@@ -27,6 +27,7 @@ MAX_WORKERS = 8  # Thread pool size for parallel subprocess calls
 HISTORY_PATH = os.path.expanduser("~/.local/cache/slurm-tui-history")
 HISTORY_MAX = 100  # max entries per dialog
 INPUT_HISTORY: dict[str, list[str]] = {}  # Per-dialog command history
+LOGIN_NODE: str = ""  # SSH target for UID resolution
 
 
 def _load_history():
@@ -111,6 +112,45 @@ def run_cmd(cmd: list[str]) -> str:
         return f"Error: {e}"
 
 
+_uid_cache: dict[str, str] = {}
+
+
+def resolve_user(name_or_uid: str) -> str:
+    """Resolve a numeric UID to a username.
+
+    Checks the local cache first, then tries SSH to LOGIN_NODE
+    to run 'getent passwd <uid>'.  Falls back to the original value.
+    """
+    if not name_or_uid.isdigit():
+        return name_or_uid
+    if name_or_uid in _uid_cache:
+        return _uid_cache[name_or_uid]
+    if LOGIN_NODE:
+        try:
+            result = subprocess.run(
+                ["ssh", "-o", "ConnectTimeout=2", "-o", "BatchMode=yes",
+                 LOGIN_NODE, "getent", "passwd", name_or_uid],
+                capture_output=True, text=True, timeout=5,
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                username = result.stdout.strip().split(":")[0]
+                _uid_cache[name_or_uid] = username
+                return username
+        except Exception:
+            pass
+    _uid_cache[name_or_uid] = name_or_uid  # negative cache
+    return name_or_uid
+
+
+def _cache_userid(userid_field: str):
+    """Parse a scontrol UserId value like 'name(uid)' into the cache."""
+    if "(" in userid_field:
+        name, rest = userid_field.split("(", 1)
+        uid = rest.rstrip(")")
+        if uid.isdigit() and name and not name.isdigit():
+            _uid_cache[uid] = name
+
+
 def fetch_all_data() -> dict:
     """Fetch all Slurm data in parallel. Returns a dict of raw outputs."""
     data = {}
@@ -123,12 +163,27 @@ def fetch_all_data() -> dict:
             data[futures[fut]] = fut.result()
 
         running_jobs = []
+        all_uids: set[str] = set()
         squeue_out = data.get("squeue_full", "")
         if squeue_out and not squeue_out.startswith("Error"):
             for line in squeue_out.split("\n"):
                 parts = line.strip().split("|")
-                if len(parts) >= 8 and parts[4] == "RUNNING":
-                    running_jobs.append((parts[0], parts[1]))
+                if len(parts) >= 8:
+                    if parts[1].isdigit():
+                        all_uids.add(parts[1])
+                    if parts[4] == "RUNNING":
+                        running_jobs.append((parts[0], parts[1]))
+
+        # Resolve any numeric UIDs in parallel via SSH
+        unresolved = all_uids - set(_uid_cache)
+        if unresolved and LOGIN_NODE:
+            uid_futures = {
+                pool.submit(resolve_user, uid): uid for uid in unresolved
+            }
+            for fut in as_completed(uid_futures):
+                fut.result()  # populates _uid_cache as side effect
+
+        running_jobs = [(jid, resolve_user(u)) for jid, u in running_jobs]
 
         current_user = os.environ.get("USER", "")
         running_jobs.sort(key=lambda x: (0 if x[1] == current_user else 1))
@@ -187,6 +242,7 @@ def build_jobs_table(squeue_output: str) -> Table:
             if line.strip():
                 parts = line.split("|")
                 if len(parts) >= 8:
+                    parts[1] = resolve_user(parts[1])
                     state = parts[4]
                     state_style = {
                         "RUNNING": GRV_BLUE,
@@ -276,7 +332,9 @@ def build_running_jobs_detail(data: dict) -> Panel:
                 fields[key] = val
 
         name = fields.get("JobName", "N/A")
-        user = fields.get("UserId", "N/A").split("(")[0]
+        raw_userid = fields.get("UserId", "N/A")
+        _cache_userid(raw_userid)
+        user = resolve_user(raw_userid.split("(")[0])
         node = fields.get("NodeList", "N/A")
         elapsed = fields.get("RunTime", "N/A")
         timelimit = fields.get("TimeLimit", "N/A")
@@ -332,15 +390,15 @@ def build_running_jobs_detail(data: dict) -> Panel:
                      title="Running Job Details", border_style=GRV_BLUE)
 
     if len(job_texts) >= 2:
+        mid = (len(job_texts) + 1) // 2
         left_texts = Text()
         right_texts = Text()
-        for i, t in enumerate(job_texts):
-            if i % 2 == 0:
-                left_texts.append_text(t)
-                left_texts.append("\n")
-            else:
-                right_texts.append_text(t)
-                right_texts.append("\n")
+        for t in job_texts[:mid]:
+            left_texts.append_text(t)
+            left_texts.append("\n")
+        for t in job_texts[mid:]:
+            right_texts.append_text(t)
+            right_texts.append("\n")
         content = Columns([left_texts, right_texts], equal=True, expand=True)
     else:
         content = job_texts[0]
@@ -840,11 +898,16 @@ def handle_key(key: str, layout: Layout, live: Live) -> bool:
 
 
 def main():
+    global LOGIN_NODE
     parser = argparse.ArgumentParser(description="Slurm TUI monitor")
     parser.add_argument("--dark", action="store_true",
                         help="Use dark background theme (default: light)")
+    parser.add_argument("--login-node", metavar="HOST",
+                        help="SSH host for resolving UIDs to usernames (e.g. IPA)")
     args = parser.parse_args()
     init_palette("dark" if args.dark else "light")
+    if args.login_node:
+        LOGIN_NODE = args.login_node
     _load_history()
 
     console = Console()
@@ -872,10 +935,10 @@ def main():
                 sinfo_out = data.get("sinfo_full", "")
 
                 layout["summary"].update(build_summary(squeue_out, sinfo_out))
+                layout["lower"].update(build_running_jobs_detail(data))
                 layout["jobs"].update(build_jobs_table(squeue_out))
                 layout["separator"].update(Text("│\n" * 20, style=GRV_DIM))
                 layout["nodes"].update(build_nodes_table(sinfo_out))
-                layout["lower"].update(build_running_jobs_detail(data))
 
                 # Poll for key input during sleep interval
                 if is_tty:
