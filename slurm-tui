@@ -663,6 +663,7 @@ def main():
             old_settings = termios.tcgetattr(sys.stdin)
             tty.setcbreak(sys.stdin.fileno())
 
+        console.show_cursor(False)
         with Live(layout, console=console, refresh_per_second=4, screen=True) as live:
             while True:
                 # Check for key press before fetch
@@ -696,6 +697,7 @@ def main():
     except KeyboardInterrupt:
         pass
     finally:
+        console.show_cursor(True)
         if is_tty and old_settings:
             termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_settings)
         console.print(f"\n[{GRV_YELLOW}]Exiting...[/]")
