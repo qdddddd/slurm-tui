@@ -3,7 +3,17 @@
 A terminal dashboard for monitoring and interacting with a Slurm HPC cluster,
 built with Python and [Rich](https://github.com/Textualize/rich).
 
-![screenshot](screenshot.jpg)
+### Dark mode
+![dark mode](screenshots/dark.png)
+
+### Light mode
+![light mode](screenshots/light.png)
+
+### Submit job
+![submit job](screenshots/submit.png)
+
+### Cancel job
+![cancel job](screenshots/cancel.png)
 
 ## Features
 
