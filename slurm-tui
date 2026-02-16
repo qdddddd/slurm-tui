@@ -112,6 +112,7 @@ def fetch_all_data() -> dict:
         data["job_details"] = job_details
 
         tail_futures = {}
+        job_user_map = {jid: usr for jid, usr in running_jobs[:6]}
         for jid in job_ids:
             detail = job_details.get(jid, "")
             if detail.startswith("Error"):
@@ -123,7 +124,8 @@ def fetch_all_data() -> dict:
                     fields[key] = val
             stdout_path = fields.get("StdOut", "")
             if stdout_path:
-                tail_futures[pool.submit(run_cmd, ["tail", "-3", stdout_path])] = jid
+                n = "6" if job_user_map.get(jid) == current_user else "3"
+                tail_futures[pool.submit(run_cmd, ["tail", "-" + n, stdout_path])] = jid
         job_tails = {}
         for fut in as_completed(tail_futures):
             jid = tail_futures[fut]
@@ -225,6 +227,8 @@ def build_running_jobs_detail(data: dict) -> Panel:
 
     job_ids = [jid for jid, _ in running_jobs[:6]]
 
+    current_user = os.environ.get("USER", "")
+
     job_texts = []
     for job_id in job_ids:
         detail = job_details.get(job_id, "")
@@ -283,7 +287,8 @@ def build_running_jobs_detail(data: dict) -> Panel:
             text.append(f"{short_path}\n", style=GRV_DIM)
             tail = job_tails.get(job_id, "")
             if tail and not tail.startswith("Error"):
-                for line in tail.split("\n")[-3:]:
+                n_lines = 5 if user == current_user else 2
+                for line in tail.split("\n")[-n_lines:]:
                     text.append(f"  {line[:120]}\n", style=GRV_DIM)
 
         job_texts.append(text)
@@ -386,13 +391,26 @@ def make_layout() -> Layout:
 # Floating command window (neovim-style overlay on the lower panel)
 # ---------------------------------------------------------------------------
 
-def path_complete(text: str) -> list[str]:
-    """Return glob-based path completions for text."""
+def path_complete(text: str, cwd: str | None = None) -> list[str]:
+    """Return glob-based path completions for text.
+
+    When *cwd* is given and *text* is a relative path, completions are
+    resolved against that directory instead of the process cwd.
+    """
     expanded = os.path.expanduser(text)
+    if not os.path.isabs(expanded) and cwd:
+        expanded = os.path.join(cwd, expanded)
     if "*" not in expanded:
         expanded += "*"
     matches = glob.glob(expanded)
-    return [m + "/" if os.path.isdir(m) else m for m in sorted(matches)]
+    # Return paths relative to cwd so the user sees short names
+    result = []
+    for m in sorted(matches):
+        is_dir = os.path.isdir(m)
+        if cwd and not os.path.isabs(text):
+            m = os.path.relpath(m, cwd)
+        result.append(m + "/" if is_dir else m)
+    return result
 
 
 def _build_float(title: str, prompt: str, buf: str,
@@ -427,7 +445,8 @@ def _dismiss_float(layout: Layout, live: Live, saved_lower):
 
 def read_input(layout: Layout, live: Live, title: str, prompt: str,
                body_lines: list[tuple[str, str]] | None = None,
-               enable_path_completion: bool = False) -> str | None:
+               enable_path_completion: bool = False,
+               completion_cwd: str | None = None) -> str | None:
     """Read a line of input inside a floating panel. Returns string or None on Escape."""
     saved_lower = layout["lower"].renderable
     buf = ""
@@ -482,7 +501,7 @@ def read_input(layout: Layout, live: Live, title: str, prompt: str,
                     parts = buf.rsplit(" ", 1)
                     tab_prefix = parts[0] + " " if len(parts) > 1 else ""
                     word = parts[-1] if len(parts) > 1 else buf
-                    tab_matches = path_complete(word)
+                    tab_matches = path_complete(word, cwd=completion_cwd)
                     tab_index = 0
                 else:
                     tab_index += 1
@@ -518,7 +537,8 @@ def handle_submit(layout: Layout, live: Live):
         ("Enter sbatch args (Esc to cancel)", f"italic {GRV_DIM}"),
     ]
     result = read_input(layout, live, " Submit Job ", ":sbatch ",
-                        body_lines=body, enable_path_completion=True)
+                        body_lines=body, enable_path_completion=True,
+                        completion_cwd=CURRENT_CWD)
     if result is None or not result.strip():
         return
 
@@ -585,7 +605,8 @@ def handle_chdir(layout: Layout, live: Live):
         ("Enter path (Tab to complete, Esc to cancel)", f"italic {GRV_DIM}"),
     ]
     result = read_input(layout, live, " Change Directory ", ":cd ",
-                        body_lines=body, enable_path_completion=True)
+                        body_lines=body, enable_path_completion=True,
+                        completion_cwd=CURRENT_CWD)
     if result is None or not result.strip():
         return
 
