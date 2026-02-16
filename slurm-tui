@@ -503,6 +503,7 @@ def read_input(layout: Layout, live: Live, title: str, prompt: str,
     tab_matches: list[str] = []
     tab_index = -1
     tab_prefix = ""
+    tab_suffix = ""
 
     # Command history for this dialog
     history = INPUT_HISTORY.setdefault(title, [])
@@ -674,18 +675,27 @@ def read_input(layout: Layout, live: Live, title: str, prompt: str,
             # Tab — path completion
             if ch == "\t" and enable_path_completion:
                 if not tab_matches:
-                    parts = buf.rsplit(" ", 1)
-                    tab_prefix = parts[0] + " " if len(parts) > 1 else ""
-                    word = parts[-1] if len(parts) > 1 else buf
+                    # Find word boundaries around cursor
+                    left = buf[:cur]
+                    right = buf[cur:]
+                    word_start = max(left.rfind(" ") + 1, 0)
+                    word_end = right.find(" ")
+                    if word_end < 0:
+                        word_end = len(buf)
+                    else:
+                        word_end += cur
+                    word = buf[word_start:word_end]
+                    tab_prefix = buf[:word_start]
+                    tab_suffix = buf[word_end:]
                     tab_matches = path_complete(word, cwd=completion_cwd)
                     if tab_matches:
                         tab_index = 0
-                        buf = tab_prefix + tab_matches[0]
-                        cur = len(buf)
+                        buf = tab_prefix + tab_matches[0] + tab_suffix
+                        cur = len(tab_prefix) + len(tab_matches[0])
                 else:
                     tab_index = (tab_index + 1) % len(tab_matches)
-                    buf = tab_prefix + tab_matches[tab_index]
-                    cur = len(buf)
+                    buf = tab_prefix + tab_matches[tab_index] + tab_suffix
+                    cur = len(tab_prefix) + len(tab_matches[tab_index])
                 continue
 
             if ch.isprintable():
