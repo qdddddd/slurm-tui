@@ -415,7 +415,9 @@ def path_complete(text: str, cwd: str | None = None) -> list[str]:
 
 def _build_float(title: str, prompt: str, buf: str,
                  body_lines: list[tuple[str, str]] | None = None,
-                 msg: str = "", msg_style: str = "") -> Panel:
+                 msg: str = "", msg_style: str = "",
+                 completions: list[str] | None = None,
+                 comp_index: int = -1) -> Panel:
     """Build a bordered floating panel with optional body text and an input line."""
     content = Text()
     if body_lines:
@@ -428,6 +430,13 @@ def _build_float(title: str, prompt: str, buf: str,
         content.append(prompt, style=f"bold {GRV_YELLOW}")
         content.append(buf, style=GRV_FG)
         content.append("\u2588", style="blink")  # block cursor
+        if completions:
+            content.append("\n")
+            for i, c in enumerate(completions):
+                if i == comp_index:
+                    content.append(f" > {c}\n", style=f"bold {GRV_AQUA}")
+                else:
+                    content.append(f"   {c}\n", style=GRV_DIM)
     return Panel(content, title=title, border_style=GRV_YELLOW, box=box.ROUNDED)
 
 
@@ -456,7 +465,9 @@ def read_input(layout: Layout, live: Live, title: str, prompt: str,
 
     try:
         while True:
-            panel = _build_float(title, prompt, buf, body_lines=body_lines)
+            panel = _build_float(title, prompt, buf, body_lines=body_lines,
+                                 completions=tab_matches if tab_matches else None,
+                                 comp_index=tab_index)
             _show_float(layout, live, panel)
 
             if not select.select([sys.stdin], [], [], 0.05)[0]:
@@ -464,14 +475,38 @@ def read_input(layout: Layout, live: Live, title: str, prompt: str,
 
             ch = sys.stdin.read(1)
 
-            # Escape — cancel
+            # Escape sequences (arrow keys)
             if ch == "\x1b":
-                while select.select([sys.stdin], [], [], 0.02)[0]:
-                    sys.stdin.read(1)
+                if select.select([sys.stdin], [], [], 0.02)[0]:
+                    seq = sys.stdin.read(1)
+                    if seq == "[" and select.select([sys.stdin], [], [], 0.02)[0]:
+                        arrow = sys.stdin.read(1)
+                        if tab_matches:
+                            if arrow == "A":  # Up
+                                tab_index = (tab_index - 1) % len(tab_matches)
+                                buf = tab_prefix + tab_matches[tab_index]
+                                continue
+                            elif arrow == "B":  # Down
+                                tab_index = (tab_index + 1) % len(tab_matches)
+                                buf = tab_prefix + tab_matches[tab_index]
+                                continue
+                        # Consume remaining escape chars
+                        while select.select([sys.stdin], [], [], 0.02)[0]:
+                            sys.stdin.read(1)
+                        continue
+                    # Consume remaining escape chars
+                    while select.select([sys.stdin], [], [], 0.02)[0]:
+                        sys.stdin.read(1)
+                    continue
+                # Bare Escape — cancel
                 return None
 
-            # Enter — submit
+            # Enter — accept selection or submit
             if ch in ("\r", "\n"):
+                if tab_matches:
+                    # Accept current selection and close dropdown
+                    tab_matches, tab_index = [], -1
+                    continue
                 return buf
 
             # Backspace
@@ -487,26 +522,29 @@ def read_input(layout: Layout, live: Live, title: str, prompt: str,
                 tab_matches, tab_index = [], -1
                 continue
 
-            # Ctrl-W — delete last word
+            # Ctrl-W — delete last word (stops at space or /)
             if ch == "\x17":
                 stripped = buf.rstrip()
-                idx = stripped.rfind(" ")
+                # Find the last space or slash boundary
+                idx = max(stripped.rfind(" "), stripped.rfind("/"))
                 buf = stripped[: idx + 1] if idx >= 0 else ""
                 tab_matches, tab_index = [], -1
                 continue
 
             # Tab — path completion
             if ch == "\t" and enable_path_completion:
-                if tab_index < 0:
+                if not tab_matches:
                     parts = buf.rsplit(" ", 1)
                     tab_prefix = parts[0] + " " if len(parts) > 1 else ""
                     word = parts[-1] if len(parts) > 1 else buf
                     tab_matches = path_complete(word, cwd=completion_cwd)
-                    tab_index = 0
+                    if tab_matches:
+                        tab_index = 0
+                        buf = tab_prefix + tab_matches[0]
                 else:
-                    tab_index += 1
-                if tab_matches:
-                    buf = tab_prefix + tab_matches[tab_index % len(tab_matches)]
+                    # Tab cycles down like arrow-down
+                    tab_index = (tab_index + 1) % len(tab_matches)
+                    buf = tab_prefix + tab_matches[tab_index]
                 continue
 
             if ch.isprintable():
@@ -518,14 +556,18 @@ def read_input(layout: Layout, live: Live, title: str, prompt: str,
 
 def show_float_message(layout: Layout, live: Live, title: str,
                        msg: str, style: str = "dim", duration: float = 2.0):
-    """Flash a message in a floating panel, then dismiss it."""
+    """Flash a message in a floating panel, then dismiss it.
+
+    Any keypress dismisses the message early.
+    """
     saved_lower = layout["lower"].renderable
     panel = _build_float(title, "", "", msg=msg, msg_style=style)
     _show_float(layout, live, panel)
     deadline = time.monotonic() + duration
     while time.monotonic() < deadline:
         if select.select([sys.stdin], [], [], 0.1)[0]:
-            sys.stdin.read(1)  # discard stray keys
+            sys.stdin.read(1)
+            break
     _dismiss_float(layout, live, saved_lower)
 
 
