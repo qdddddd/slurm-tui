@@ -451,7 +451,8 @@ def _build_float(title: str, prompt: str, buf: str,
                  body_lines: list[tuple[str, str]] | None = None,
                  msg: str = "", msg_style: str = "",
                  completions: list[str] | None = None,
-                 comp_index: int = -1) -> Panel:
+                 comp_index: int = -1,
+                 cursor_pos: int | None = None) -> Panel:
     """Build a bordered floating panel with optional body text and an input line."""
     content = Text()
     if body_lines:
@@ -462,8 +463,13 @@ def _build_float(title: str, prompt: str, buf: str,
         content.append(msg, style=msg_style or GRV_GRAY)
     else:
         content.append(prompt, style=f"bold {GRV_YELLOW}")
-        content.append(buf, style=GRV_FG)
-        content.append("\u2588", style="blink")  # block cursor
+        pos = cursor_pos if cursor_pos is not None else len(buf)
+        content.append(buf[:pos], style=GRV_FG)
+        if pos < len(buf):
+            content.append(buf[pos], style=f"reverse {GRV_FG}")
+            content.append(buf[pos + 1:], style=GRV_FG)
+        else:
+            content.append("\u2588", style="blink")  # block cursor at end
         if completions:
             content.append("\n")
             for i, c in enumerate(completions):
@@ -493,36 +499,43 @@ def read_input(layout: Layout, live: Live, title: str, prompt: str,
     """Read a line of input inside a floating panel. Returns string or None on Escape."""
     saved_lower = layout["lower"].renderable
     buf = ""
+    cur = 0  # cursor position within buf
     tab_matches: list[str] = []
     tab_index = -1
     tab_prefix = ""
 
     # Command history for this dialog
     history = INPUT_HISTORY.setdefault(title, [])
-    hist_index = len(history)  # points past the end = current (new) input
-    saved_buf = ""  # saves the in-progress input when browsing history
+    hist_index = len(history)
+    saved_buf = ""
 
     def _hist_up():
-        nonlocal buf, hist_index, saved_buf
+        nonlocal buf, cur, hist_index, saved_buf
         if not history or hist_index <= 0:
             return
         if hist_index == len(history):
-            saved_buf = buf  # save current input before navigating
+            saved_buf = buf
         hist_index -= 1
         buf = history[hist_index]
+        cur = len(buf)
 
     def _hist_down():
-        nonlocal buf, hist_index, saved_buf
+        nonlocal buf, cur, hist_index, saved_buf
         if hist_index >= len(history):
             return
         hist_index += 1
         buf = history[hist_index] if hist_index < len(history) else saved_buf
+        cur = len(buf)
+
+    def _clear_completion():
+        nonlocal tab_matches, tab_index
+        tab_matches, tab_index = [], -1
 
     try:
         while True:
             panel = _build_float(title, prompt, buf, body_lines=body_lines,
                                  completions=tab_matches if tab_matches else None,
-                                 comp_index=tab_index)
+                                 comp_index=tab_index, cursor_pos=cur)
             _show_float(layout, live, panel)
 
             if not select.select([sys.stdin], [], [], 0.05)[0]:
@@ -540,6 +553,7 @@ def read_input(layout: Layout, live: Live, title: str, prompt: str,
                             if tab_matches:
                                 tab_index = (tab_index - 1) % len(tab_matches)
                                 buf = tab_prefix + tab_matches[tab_index]
+                                cur = len(buf)
                             else:
                                 _hist_up()
                             continue
@@ -547,8 +561,23 @@ def read_input(layout: Layout, live: Live, title: str, prompt: str,
                             if tab_matches:
                                 tab_index = (tab_index + 1) % len(tab_matches)
                                 buf = tab_prefix + tab_matches[tab_index]
+                                cur = len(buf)
                             else:
                                 _hist_down()
+                            continue
+                        elif arrow == "C":  # Right
+                            if cur < len(buf):
+                                cur += 1
+                            continue
+                        elif arrow == "D":  # Left
+                            if cur > 0:
+                                cur -= 1
+                            continue
+                        elif arrow == "H":  # Home
+                            cur = 0
+                            continue
+                        elif arrow == "F":  # End
+                            cur = len(buf)
                             continue
                         # Consume remaining escape chars
                         while select.select([sys.stdin], [], [], 0.02)[0]:
@@ -560,6 +589,41 @@ def read_input(layout: Layout, live: Live, title: str, prompt: str,
                     continue
                 # Bare Escape — cancel
                 return None
+
+            # Ctrl-A — beginning of line
+            if ch == "\x01":
+                cur = 0
+                continue
+
+            # Ctrl-E — end of line
+            if ch == "\x05":
+                cur = len(buf)
+                continue
+
+            # Ctrl-B — back one char
+            if ch == "\x02":
+                if cur > 0:
+                    cur -= 1
+                continue
+
+            # Ctrl-F — forward one char
+            if ch == "\x06":
+                if cur < len(buf):
+                    cur += 1
+                continue
+
+            # Ctrl-D — delete char under cursor (or no-op if empty)
+            if ch == "\x04":
+                if cur < len(buf):
+                    buf = buf[:cur] + buf[cur + 1:]
+                    _clear_completion()
+                continue
+
+            # Ctrl-K — kill from cursor to end of line
+            if ch == "\x0b":
+                buf = buf[:cur]
+                _clear_completion()
+                continue
 
             # Ctrl-P — history up
             if ch == "\x10":
@@ -576,33 +640,35 @@ def read_input(layout: Layout, live: Live, title: str, prompt: str,
             # Enter — accept selection or submit
             if ch in ("\r", "\n"):
                 if tab_matches:
-                    # Accept current selection and close dropdown
-                    tab_matches, tab_index = [], -1
+                    _clear_completion()
                     continue
                 if buf.strip():
                     history.append(buf)
                 return buf
 
-            # Backspace
+            # Backspace — delete char before cursor
             if ch in ("\x7f", "\x08"):
-                if buf:
-                    buf = buf[:-1]
-                tab_matches, tab_index = [], -1
+                if cur > 0:
+                    buf = buf[:cur - 1] + buf[cur:]
+                    cur -= 1
+                _clear_completion()
                 continue
 
-            # Ctrl-U — clear line
+            # Ctrl-U — kill from cursor to beginning of line
             if ch == "\x15":
-                buf = ""
-                tab_matches, tab_index = [], -1
+                buf = buf[cur:]
+                cur = 0
+                _clear_completion()
                 continue
 
-            # Ctrl-W — delete last word (stops at space or /)
+            # Ctrl-W — delete last word before cursor (stops at space or /)
             if ch == "\x17":
-                stripped = buf.rstrip()
-                # Find the last space or slash boundary
-                idx = max(stripped.rfind(" "), stripped.rfind("/"))
-                buf = stripped[: idx + 1] if idx >= 0 else ""
-                tab_matches, tab_index = [], -1
+                left = buf[:cur].rstrip()
+                idx = max(left.rfind(" "), left.rfind("/"))
+                new_left = left[: idx + 1] if idx >= 0 else ""
+                buf = new_left + buf[cur:]
+                cur = len(new_left)
+                _clear_completion()
                 continue
 
             # Tab — path completion
@@ -615,15 +681,17 @@ def read_input(layout: Layout, live: Live, title: str, prompt: str,
                     if tab_matches:
                         tab_index = 0
                         buf = tab_prefix + tab_matches[0]
+                        cur = len(buf)
                 else:
-                    # Tab cycles down like arrow-down
                     tab_index = (tab_index + 1) % len(tab_matches)
                     buf = tab_prefix + tab_matches[tab_index]
+                    cur = len(buf)
                 continue
 
             if ch.isprintable():
-                buf += ch
-                tab_matches, tab_index = [], -1
+                buf = buf[:cur] + ch + buf[cur:]
+                cur += 1
+                _clear_completion()
     finally:
         _dismiss_float(layout, live, saved_lower)
 
