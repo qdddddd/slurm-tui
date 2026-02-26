@@ -151,7 +151,17 @@ def _cache_userid(userid_field: str):
             _uid_cache[uid] = name
 
 
-def fetch_all_data() -> dict:
+def calc_max_jobs(console_height: int) -> int:
+    """Calculate how many running jobs can be displayed given terminal height."""
+    # Layout: summary=3, upper=12, gap=1, panel borders=2
+    available = console_height - 3 - 12 - 1 - 2
+    # Each job block: header + user/node + time + cpus/mem + log path + blank separator = 7 lines
+    lines_per_job = 7
+    per_column = max(1, available // lines_per_job)
+    return per_column * 2  # two-column layout
+
+
+def fetch_all_data(max_jobs: int = 20) -> dict:
     """Fetch all Slurm data in parallel. Returns a dict of raw outputs."""
     data = {}
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
@@ -189,7 +199,7 @@ def fetch_all_data() -> dict:
         running_jobs.sort(key=lambda x: (0 if x[1] == current_user else 1))
         data["running_jobs"] = running_jobs
 
-        job_ids = [jid for jid, _ in running_jobs[:6]]
+        job_ids = [jid for jid, _ in running_jobs[:max_jobs]]
         detail_futures = {
             pool.submit(run_cmd, ["scontrol", "show", "job", jid]): jid
             for jid in job_ids
@@ -201,7 +211,7 @@ def fetch_all_data() -> dict:
         data["job_details"] = job_details
 
         tail_futures = {}
-        job_user_map = {jid: usr for jid, usr in running_jobs[:6]}
+        job_user_map = {jid: usr for jid, usr in running_jobs[:max_jobs]}
         for jid in job_ids:
             detail = job_details.get(jid, "")
             if detail.startswith("Error"):
@@ -305,7 +315,7 @@ def build_nodes_table(sinfo_output: str) -> Table:
     return table
 
 
-def build_running_jobs_detail(data: dict) -> Panel:
+def build_running_jobs_detail(data: dict, max_jobs: int = 20) -> Panel:
     """Build running job detail panel from pre-fetched data."""
     running_jobs = data.get("running_jobs", [])
     job_details = data.get("job_details", {})
@@ -315,7 +325,7 @@ def build_running_jobs_detail(data: dict) -> Panel:
         return Panel(f"[{GRV_GRAY}]No running jobs[/]",
                      title="Running Job Details", border_style=GRV_BLUE)
 
-    job_ids = [jid for jid, _ in running_jobs[:6]]
+    job_ids = [jid for jid, _ in running_jobs[:max_jobs]]
 
     current_user = os.environ.get("USER", "")
 
@@ -374,14 +384,13 @@ def build_running_jobs_detail(data: dict) -> Panel:
         text.append("\n")
 
         if stdout != "N/A" and stdout:
-            short_path = stdout if len(stdout) <= 120 else "..." + stdout[-117:]
             text.append(f"Log: ", style=GRV_GRAY)
-            text.append(f"{short_path}\n", style=GRV_DIM)
+            text.append(f"{stdout}\n", style=GRV_DIM)
             tail = job_tails.get(job_id, "")
             if tail and not tail.startswith("Error"):
                 n_lines = 5 if user == current_user else 2
                 for line in tail.split("\n")[-n_lines:]:
-                    text.append(f"  {line[:120]}\n", style=GRV_DIM)
+                    text.append(f"  {line}\n", style=GRV_DIM)
 
         job_texts.append(text)
 
@@ -399,14 +408,19 @@ def build_running_jobs_detail(data: dict) -> Panel:
         for t in job_texts[mid:]:
             right_texts.append_text(t)
             right_texts.append("\n")
-        content = Columns([left_texts, right_texts], equal=True, expand=True)
+        grid = Table.grid(expand=True)
+        grid.add_column(ratio=1, overflow="fold")
+        grid.add_column(width=2)
+        grid.add_column(ratio=1, overflow="fold")
+        grid.add_row(left_texts, "", right_texts)
+        content = grid
     else:
         content = job_texts[0]
 
     total = len(running_jobs)
     title = f"Running Job Details ({total})"
-    if total > 6:
-        title += f" - showing 6 of {total}"
+    if total > max_jobs:
+        title += f" - showing {max_jobs} of {total}"
 
     return Panel(content, title=title, border_style=GRV_BLUE)
 
@@ -468,6 +482,7 @@ def make_layout() -> Layout:
     layout.split_column(
         Layout(name="summary", size=3),
         Layout(name="upper", size=12),
+        Layout(name="gap", size=1),
         Layout(name="lower"),
     )
     layout["upper"].split_row(
@@ -476,6 +491,7 @@ def make_layout() -> Layout:
         Layout(name="nodes", ratio=2),
     )
     layout["lower"].update(Layout(name="details"))
+    layout["gap"].update(Text(""))
     return layout
 
 
@@ -781,6 +797,15 @@ def show_float_message(layout: Layout, live: Live, title: str,
     _dismiss_float(layout, live, saved_lower)
 
 
+def _update_summary_cwd(layout: Layout):
+    """Update the summary panel title with CURRENT_CWD immediately."""
+    summary = layout["summary"].renderable
+    if isinstance(summary, Panel):
+        layout["summary"].update(
+            Panel(summary.renderable, title=f"cwd: {CURRENT_CWD}", border_style=summary.border_style)
+        )
+
+
 def handle_submit(layout: Layout, live: Live):
     """Floating sbatch submission."""
     global CURRENT_CWD
@@ -863,8 +888,12 @@ def handle_chdir(layout: Layout, live: Live):
         return
 
     new_dir = os.path.expanduser(result.strip())
+    if not os.path.isabs(new_dir):
+        new_dir = os.path.join(CURRENT_CWD, new_dir)
+    new_dir = os.path.abspath(new_dir)
     if os.path.isdir(new_dir):
-        CURRENT_CWD = os.path.abspath(new_dir)
+        CURRENT_CWD = new_dir
+        _update_summary_cwd(layout)
         show_float_message(layout, live, " Change Directory ",
                            f"cwd: {CURRENT_CWD}", style=GRV_GREEN)
     else:
@@ -930,12 +959,13 @@ def main():
                     if key and handle_key(key, layout, live):
                         break
 
-                data = fetch_all_data()
+                max_jobs = calc_max_jobs(console.size.height)
+                data = fetch_all_data(max_jobs)
                 squeue_out = data.get("squeue_full", "")
                 sinfo_out = data.get("sinfo_full", "")
 
                 layout["summary"].update(build_summary(squeue_out, sinfo_out))
-                layout["lower"].update(build_running_jobs_detail(data))
+                layout["lower"].update(build_running_jobs_detail(data, max_jobs))
                 layout["jobs"].update(build_jobs_table(squeue_out))
                 layout["separator"].update(Text("│\n" * 20, style=GRV_DIM))
                 layout["nodes"].update(build_nodes_table(sinfo_out))
