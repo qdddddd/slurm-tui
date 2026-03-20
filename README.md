@@ -1,7 +1,7 @@
 # slurm-tui
 
 A terminal dashboard for monitoring and interacting with a Slurm HPC cluster,
-built with Python and [Rich](https://github.com/Textualize/rich).
+built with Rust and [Ratatui](https://github.com/ratatui/ratatui).
 
 ### Dark mode
 ![dark mode](screenshots/dark.png)
@@ -27,12 +27,24 @@ built with Python and [Rich](https://github.com/Textualize/rich).
 
 ## Requirements
 
-- Python 3
-- `rich` (`pip install rich`)
+- Rust toolchain (1.85+)
 - Access to Slurm CLI tools (`squeue`, `sinfo`, `scontrol`, `sbatch`, `scancel`)
+
+## Build
+
+```
+cargo build --release
+```
 
 ## Usage
 
 ```
-./slurm-tui
+./target/release/slurm-tui
+```
+
+### Options
+
+```
+--dark              Use dark background theme (default: light)
+--login-node HOST   SSH host for resolving UIDs to usernames
 ```
