@@ -2,7 +2,7 @@ use ratatui::{
     layout::{Alignment, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph, Wrap},
+    widgets::{Block, Borders, Clear, Paragraph, Wrap},
     Frame,
 };
 use std::path::Path;
@@ -320,6 +320,9 @@ pub fn draw_modal(f: &mut Frame, area: Rect, modal: &Modal, p: &Palette) {
             }
         }
     }
+
+    // Clear the area behind the modal so no stale text bleeds through
+    f.render_widget(Clear, area);
 
     let block = Block::default()
         .borders(Borders::ALL)
