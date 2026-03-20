@@ -284,7 +284,7 @@ pub fn fetch_all(max_jobs: usize, login_node: &str) -> SlurmData {
     for (i, h) in tail_handles {
         if let Ok(tail) = h.join() {
             if !tail.starts_with("Error") {
-                parsed[i].0.tail = tail;
+                parsed[i].0.tail = resolve_cr(&tail);
             }
         }
     }
@@ -344,6 +344,25 @@ fn shorten_reason(reason: &str) -> String {
     } else {
         inner.chars().take(8).collect()
     }
+}
+
+/// Process carriage returns in tail output.
+/// Progress bars (tqdm, etc.) use \r to overwrite the same line, so `tail`
+/// returns one huge line with all updates concatenated.  Split on \r and
+/// keep only the last non-empty segment of each line.
+fn resolve_cr(raw: &str) -> String {
+    raw.lines()
+        .map(|line| {
+            if line.contains('\r') {
+                line.rsplit('\r')
+                    .find(|s| !s.is_empty())
+                    .unwrap_or("")
+            } else {
+                line
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Fetch user's jobs for cancel dialog.

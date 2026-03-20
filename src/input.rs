@@ -2,7 +2,7 @@ use ratatui::{
     layout::{Alignment, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, Paragraph, Wrap},
+    widgets::{Block, Borders, Padding, Paragraph},
     Frame,
 };
 use std::path::Path;
@@ -321,15 +321,13 @@ pub fn draw_modal(f: &mut Frame, area: Rect, modal: &Modal, p: &Palette) {
         }
     }
 
-    // Clear the area behind the modal so no stale text bleeds through
-    f.render_widget(Clear, area);
-
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(p.yellow))
-        .padding(ratatui::widgets::Padding::horizontal(1))
         .title_alignment(Alignment::Center)
-        .title(modal.title.as_str());
-    let paragraph = Paragraph::new(lines).block(block).wrap(Wrap { trim: false });
+        .title(modal.title.as_str())
+        .padding(Padding::horizontal(1));
+
+    let paragraph = Paragraph::new(lines).block(block);
     f.render_widget(paragraph, area);
 }

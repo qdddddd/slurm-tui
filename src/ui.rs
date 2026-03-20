@@ -3,7 +3,7 @@ use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Cell, Clear, Padding, Paragraph, Row, Table, Wrap},
+    widgets::{Block, Borders, Cell, Padding, Paragraph, Row, Table, Wrap},
     Frame,
 };
 
@@ -13,7 +13,6 @@ use crate::slurm::{NodeInfo, QueueJob};
 
 pub fn draw(f: &mut Frame, app: &App) {
     let p = &app.palette;
-    f.render_widget(Clear, f.area());
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([

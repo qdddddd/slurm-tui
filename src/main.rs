@@ -57,6 +57,7 @@ fn main() -> io::Result<()> {
 
 fn run_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> io::Result<()> {
     let mut last_fetch = Instant::now() - REFRESH_INTERVAL; // force immediate fetch
+    let mut had_modal = false;
 
     loop {
         // Check timed message dismissal
@@ -70,6 +71,14 @@ fn run_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App
                 app.fetch_data();
                 last_fetch = Instant::now();
             }
+        }
+
+        // Force full redraw when modal state changes (open/close) to prevent
+        // stale content from ratatui's double-buffered back buffer bleeding through.
+        let has_modal = app.modal.is_some();
+        if has_modal != had_modal {
+            terminal.clear()?;
+            had_modal = has_modal;
         }
 
         terminal.draw(|f| ui::draw(f, app))?;
