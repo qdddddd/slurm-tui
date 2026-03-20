@@ -79,6 +79,7 @@ impl App {
         let hist = self.history.get(" Cancel Job ");
         modal.hist_index = hist.len();
         self.modal = Some(modal);
+
     }
 
     pub fn open_chdir(&mut self) {
@@ -90,6 +91,7 @@ impl App {
         let hist = self.history.get(" Change Directory ");
         modal.hist_index = hist.len();
         self.modal = Some(modal);
+
     }
 
     // ── Modal submission handlers ──
@@ -121,6 +123,7 @@ impl App {
                     let modal = Modal::new(ModalKind::CancelConfirm, " Cancel Job ", ":cancel ALL jobs? [y/N] ")
                         .with_body(body);
                     self.modal = Some(modal);
+            
                     return;
                 }
                 self.history.push(" Cancel Job ", val.clone());
@@ -181,11 +184,13 @@ impl App {
         modal.set_message(msg.to_string(), style);
         self.modal = Some(modal);
         self.msg_deadline = Some(std::time::Instant::now() + std::time::Duration::from_secs(2));
+
     }
 
     pub fn dismiss_modal(&mut self) {
         self.modal = None;
         self.msg_deadline = None;
+
     }
 
     pub fn has_timed_message(&self) -> bool {

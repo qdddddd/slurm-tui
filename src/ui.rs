@@ -3,7 +3,7 @@ use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Cell, Clear, Padding, Paragraph, Row, Table, Wrap},
+    widgets::{Block, Borders, Cell, Padding, Paragraph, Row, Table, Wrap},
     Frame,
 };
 
@@ -13,7 +13,6 @@ use crate::slurm::{NodeInfo, QueueJob};
 
 pub fn draw(f: &mut Frame, app: &App) {
     let p = &app.palette;
-    f.render_widget(Clear, f.area());
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -259,6 +258,7 @@ fn draw_job_details(f: &mut Frame, area: Rect, app: &App, p: &Palette) {
 
     let inner = details_block.inner(area);
     let content = inset_horizontal(inner, 2);
+    clear_area(f, content);
 
     if details.is_empty() {
         let text = Paragraph::new(Span::styled("No running jobs", Style::default().fg(p.gray)));
@@ -344,6 +344,8 @@ fn draw_job_details(f: &mut Frame, area: Rect, app: &App, p: &Palette) {
             .constraints([Constraint::Percentage(50), Constraint::Length(6), Constraint::Percentage(50)])
             .split(content);
 
+        clear_area(f, cols[0]);
+        clear_area(f, cols[2]);
         f.render_widget(Paragraph::new(left_lines), cols[0]);
         f.render_widget(Paragraph::new(right_lines), cols[2]);
     }
@@ -388,6 +390,17 @@ fn inset_horizontal(area: Rect, inset: u16) -> Rect {
             height: area.height,
         }
     }
+}
+
+fn clear_area(f: &mut Frame, area: Rect) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+
+    let blank_line = " ".repeat(area.width as usize);
+    let lines: Vec<Line> = (0..area.height).map(|_| Line::from(blank_line.as_str())).collect();
+    let paragraph = Paragraph::new(lines).style(Style::reset());
+    f.render_widget(paragraph, area);
 }
 
 fn truncate(s: &str, max: usize) -> &str {

@@ -2,7 +2,7 @@ use ratatui::{
     layout::{Alignment, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph, Wrap},
+    widgets::{Block, Borders, Padding, Paragraph},
     Frame,
 };
 use std::path::Path;
@@ -252,6 +252,7 @@ pub fn handle_tab(modal: &mut Modal, cwd: &str) {
 // ── Drawing ──
 
 pub fn draw_modal(f: &mut Frame, area: Rect, modal: &Modal, p: &Palette) {
+    clear_modal_area(f, area);
     let mut lines: Vec<Line> = Vec::new();
 
     // Body lines
@@ -324,9 +325,21 @@ pub fn draw_modal(f: &mut Frame, area: Rect, modal: &Modal, p: &Palette) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(p.yellow))
-        .padding(ratatui::widgets::Padding::horizontal(1))
         .title_alignment(Alignment::Center)
-        .title(modal.title.as_str());
-    let paragraph = Paragraph::new(lines).block(block).wrap(Wrap { trim: false });
+        .title(modal.title.as_str())
+        .padding(Padding::horizontal(1));
+
+    let paragraph = Paragraph::new(lines).block(block);
+    f.render_widget(paragraph, area);
+}
+
+fn clear_modal_area(f: &mut Frame, area: Rect) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+
+    let blank_line = " ".repeat(area.width as usize);
+    let lines: Vec<Line> = (0..area.height).map(|_| Line::from(blank_line.as_str())).collect();
+    let paragraph = Paragraph::new(lines).style(Style::reset());
     f.render_widget(paragraph, area);
 }
