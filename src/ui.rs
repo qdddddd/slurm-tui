@@ -78,6 +78,8 @@ fn draw_summary(f: &mut Frame, area: Rect, app: &App, p: &Palette) {
         Span::styled(":cancel ", Style::default().fg(p.gray)),
         Span::styled("d", Style::default().fg(p.orange).add_modifier(Modifier::BOLD)),
         Span::styled(":chdir ", Style::default().fg(p.gray)),
+        Span::styled("l", Style::default().fg(p.orange).add_modifier(Modifier::BOLD)),
+        Span::styled(":logs ", Style::default().fg(p.gray)),
         Span::styled("q", Style::default().fg(p.orange).add_modifier(Modifier::BOLD)),
         Span::styled(":quit", Style::default().fg(p.gray)),
     ];

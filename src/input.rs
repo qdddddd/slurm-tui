@@ -18,6 +18,7 @@ pub struct Modal {
     pub cursor: usize,
     pub body_lines: Vec<(String, BodyStyle)>,
     pub message: Option<(String, MsgStyle)>,
+    pub selection: usize,
     /// Tab completion state
     pub completions: Vec<String>,
     pub comp_index: isize,
@@ -34,6 +35,7 @@ pub enum ModalKind {
     Cancel,
     CancelConfirm,
     Chdir,
+    Logs,
 }
 
 #[derive(Clone, Copy)]
@@ -65,6 +67,7 @@ impl Modal {
             cursor: 0,
             body_lines: Vec::new(),
             message: None,
+            selection: 0,
             completions: Vec::new(),
             comp_index: -1,
             comp_prefix: String::new(),
@@ -227,7 +230,6 @@ pub fn path_complete(text: &str, cwd: Option<&str>) -> Vec<String> {
 
 pub fn handle_tab(modal: &mut Modal, cwd: &str) {
     if modal.completions.is_empty() {
-        // Find word around cursor
         let left = &modal.buf[..modal.cursor];
         let right = &modal.buf[modal.cursor..];
         let word_start = left.rfind(' ').map(|i| i + 1).unwrap_or(0);
@@ -255,8 +257,7 @@ pub fn draw_modal(f: &mut Frame, area: Rect, modal: &Modal, p: &Palette) {
     clear_modal_area(f, area);
     let mut lines: Vec<Line> = Vec::new();
 
-    // Body lines
-    for (text, style) in &modal.body_lines {
+    for (i, (text, style)) in modal.body_lines.iter().enumerate() {
         let color = match style {
             BodyStyle::Gray => p.gray,
             BodyStyle::Dim => p.dim,
@@ -265,58 +266,64 @@ pub fn draw_modal(f: &mut Frame, area: Rect, modal: &Modal, p: &Palette) {
             BodyStyle::Fg => p.fg,
             BodyStyle::Red => p.red,
         };
-        lines.push(Line::from(Span::styled(text.as_str(), Style::default().fg(color))));
+        let line_style = if matches!(modal.kind, ModalKind::Logs) && i == modal.selection {
+            Style::default().fg(p.aqua).add_modifier(Modifier::BOLD | Modifier::REVERSED)
+        } else {
+            Style::default().fg(color)
+        };
+        lines.push(Line::from(Span::styled(text.as_str(), line_style)));
     }
-    if !modal.body_lines.is_empty() {
+
+    if !modal.body_lines.is_empty() && !matches!(modal.kind, ModalKind::Logs) {
         lines.push(Line::from(""));
     }
 
-    // Message or input line
-    if let Some((ref msg, ref style)) = modal.message {
-        let color = match style {
-            MsgStyle::Green => p.green,
-            MsgStyle::Red => p.red,
-            MsgStyle::Yellow => p.yellow,
-            MsgStyle::Gray => p.gray,
-        };
-        lines.push(Line::from(Span::styled(msg.as_str(), Style::default().fg(color))));
-    } else {
-        let mut spans = vec![Span::styled(
-            &modal.prompt,
-            Style::default().fg(p.yellow).add_modifier(Modifier::BOLD),
-        )];
-        let pos = modal.cursor;
-        let buf = &modal.buf;
-        spans.push(Span::styled(&buf[..pos], Style::default().fg(p.fg)));
-        if pos < buf.len() {
-            let next_end = buf[pos..]
-                .char_indices()
-                .nth(1)
-                .map(|(i, _)| pos + i)
-                .unwrap_or(buf.len());
-            spans.push(Span::styled(
-                &buf[pos..next_end],
-                Style::default().fg(p.fg).add_modifier(Modifier::REVERSED),
-            ));
-            spans.push(Span::styled(&buf[next_end..], Style::default().fg(p.fg)));
+    if !matches!(modal.kind, ModalKind::Logs) {
+        if let Some((ref msg, ref style)) = modal.message {
+            let color = match style {
+                MsgStyle::Green => p.green,
+                MsgStyle::Red => p.red,
+                MsgStyle::Yellow => p.yellow,
+                MsgStyle::Gray => p.gray,
+            };
+            lines.push(Line::from(Span::styled(msg.as_str(), Style::default().fg(color))));
         } else {
-            spans.push(Span::styled("█", Style::default().fg(p.fg)));
-        }
-        lines.push(Line::from(spans));
+            let mut spans = vec![Span::styled(
+                &modal.prompt,
+                Style::default().fg(p.yellow).add_modifier(Modifier::BOLD),
+            )];
+            let pos = modal.cursor;
+            let buf = &modal.buf;
+            spans.push(Span::styled(&buf[..pos], Style::default().fg(p.fg)));
+            if pos < buf.len() {
+                let next_end = buf[pos..]
+                    .char_indices()
+                    .nth(1)
+                    .map(|(i, _)| pos + i)
+                    .unwrap_or(buf.len());
+                spans.push(Span::styled(
+                    &buf[pos..next_end],
+                    Style::default().fg(p.fg).add_modifier(Modifier::REVERSED),
+                ));
+                spans.push(Span::styled(&buf[next_end..], Style::default().fg(p.fg)));
+            } else {
+                spans.push(Span::styled("█", Style::default().fg(p.fg)));
+            }
+            lines.push(Line::from(spans));
 
-        // Completions
-        if !modal.completions.is_empty() {
-            for (i, c) in modal.completions.iter().enumerate() {
-                if i as isize == modal.comp_index {
-                    lines.push(Line::from(Span::styled(
-                        format!(" > {c}"),
-                        Style::default().fg(p.aqua).add_modifier(Modifier::BOLD),
-                    )));
-                } else {
-                    lines.push(Line::from(Span::styled(
-                        format!("   {c}"),
-                        Style::default().fg(p.dim),
-                    )));
+            if !modal.completions.is_empty() {
+                for (i, c) in modal.completions.iter().enumerate() {
+                    if i as isize == modal.comp_index {
+                        lines.push(Line::from(Span::styled(
+                            format!(" > {c}"),
+                            Style::default().fg(p.aqua).add_modifier(Modifier::BOLD),
+                        )));
+                    } else {
+                        lines.push(Line::from(Span::styled(
+                            format!("   {c}"),
+                            Style::default().fg(p.dim),
+                        )));
+                    }
                 }
             }
         }

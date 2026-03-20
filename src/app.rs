@@ -10,6 +10,7 @@ pub struct App {
     pub data: SlurmData,
     pub max_jobs: usize,
     pub modal: Option<Modal>,
+    pub pending_less_path: Option<String>,
     pub history: InputHistory,
     pub should_quit: bool,
     /// When set, modal shows a timed message then auto-dismisses
@@ -27,6 +28,7 @@ impl App {
             data: SlurmData::default(),
             max_jobs: 20,
             modal: None,
+            pending_less_path: None,
             history: InputHistory::new(),
             should_quit: false,
             msg_deadline: None,
@@ -94,6 +96,42 @@ impl App {
 
     }
 
+    pub fn open_logs(&mut self) {
+        let output = slurm::fetch_recent_tasks(10);
+        if output.is_empty() || output.starts_with("Error") {
+            self.flash_message(" View Logs ", "No recent tasks found", MsgStyle::Yellow);
+            return;
+        }
+        let mut body: Vec<(String, BodyStyle)> =
+            vec![("Select a job ID (Up/Down, Enter, Esc to cancel)".into(), BodyStyle::Dim)];
+        for line in output.lines() {
+            let parts: Vec<&str> = line.trim().split('|').collect();
+            if parts.len() >= 3 {
+                let style = match parts[2] {
+                    "COMPLETED" => BodyStyle::Gray,
+                    "FAILED" | "CANCELLED" | "TIMEOUT" | "OUT_OF_MEMORY" => BodyStyle::Red,
+                    "RUNNING" | "PENDING" => BodyStyle::Blue,
+                    _ => BodyStyle::Fg,
+                };
+                body.push((format!("{:>8}  {:<30} {}", parts[0], parts[1], parts[2]), style));
+            }
+        }
+        let mut modal = Modal::new(ModalKind::Logs, " View Logs ", "").with_body(body);
+        modal.selection = 1.min(modal.body_lines.len().saturating_sub(1));
+        self.pending_less_path = None;
+        self.modal = Some(modal);
+    }
+
+    pub fn open_log_view(&mut self, job_id: &str) {
+        match slurm::resolve_job_stdout(job_id) {
+            Ok(path) => {
+                self.pending_less_path = Some(path);
+                self.modal = None;
+            }
+            Err(err) => self.flash_message(" View Logs ", &err, MsgStyle::Red),
+        }
+    }
+
     // ── Modal submission handlers ──
 
     pub fn handle_modal_submit(&mut self) {
@@ -123,7 +161,7 @@ impl App {
                     let modal = Modal::new(ModalKind::CancelConfirm, " Cancel Job ", ":cancel ALL jobs? [y/N] ")
                         .with_body(body);
                     self.modal = Some(modal);
-            
+    
                     return;
                 }
                 self.history.push(" Cancel Job ", val.clone());
@@ -176,6 +214,9 @@ impl App {
                     );
                 }
             }
+            ModalKind::Logs => {
+                // Handled via dedicated open_* helpers; submit has no effect
+            }
         }
     }
 
@@ -189,6 +230,7 @@ impl App {
 
     pub fn dismiss_modal(&mut self) {
         self.modal = None;
+        self.pending_less_path = None;
         self.msg_deadline = None;
 
     }

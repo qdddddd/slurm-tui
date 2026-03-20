@@ -225,7 +225,7 @@ pub fn fetch_all(max_jobs: usize, login_node: &str) -> SlurmData {
             Some(r) if !r.starts_with("Error") => r,
             _ => continue,
         };
-        let fields = parse_scontrol(raw);
+        let fields = parse_scontrol(&raw);
         let name = fields.get("JobName").cloned().unwrap_or_else(|| "N/A".into());
         let raw_userid = fields.get("UserId").cloned().unwrap_or_else(|| "N/A".into());
         cache_userid(&raw_userid);
@@ -346,12 +346,39 @@ fn shorten_reason(reason: &str) -> String {
     }
 }
 
-/// Process carriage returns in tail output.
+/// Strip ANSI escape sequences (CSI codes like `\x1b[0;128;0m`).
+fn strip_ansi(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            // Consume CSI sequence: ESC [ ... final_byte
+            if let Some(next) = chars.next() {
+                if next == '[' {
+                    // Skip until we hit a letter (0x40..=0x7E)
+                    for ch in chars.by_ref() {
+                        if ch.is_ascii_alphabetic() || ch == 'm' {
+                            break;
+                        }
+                    }
+                }
+                // else: non-CSI escape, just skip the two chars
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// Process carriage returns in tail output and strip ANSI codes.
 /// Progress bars (tqdm, etc.) use \r to overwrite the same line, so `tail`
 /// returns one huge line with all updates concatenated.  Split on \r and
 /// keep only the last non-empty segment of each line.
 fn resolve_cr(raw: &str) -> String {
-    raw.lines()
+    let cleaned = strip_ansi(raw);
+    cleaned
+        .lines()
         .map(|line| {
             if line.contains('\r') {
                 line.rsplit('\r')
@@ -370,6 +397,110 @@ pub fn fetch_user_jobs() -> String {
     let user = std::env::var("USER").unwrap_or_default();
     run_cmd(&["squeue", "-u", &user, "-h", "-o", "%i|%j|%T"])
 }
+
+/// Fetch recent tasks for the current user using `sacct`.
+/// Returns lines in the form `JOBID|NAME|STATE`, newest first,
+/// limited to `limit` distinct top-level jobs (no steps).
+pub fn fetch_recent_tasks(limit: usize) -> String {
+    let user = std::env::var("USER").unwrap_or_default();
+    let raw = run_cmd(&[
+        "sacct",
+        "-u",
+        &user,
+        "-X",
+        "-n",
+        "-P",
+        "-o",
+        "JobIDRaw,JobName,State",
+    ]);
+    if raw.is_empty() || raw.starts_with("Error") {
+        return raw;
+    }
+
+    let mut lines: Vec<&str> = raw.lines().collect();
+    lines.reverse();
+
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut out_lines: Vec<String> = Vec::new();
+
+    for line in lines {
+        let parts: Vec<&str> = line.trim().split('|').collect();
+        if parts.len() < 3 {
+            continue;
+        }
+        let job_id = parts[0].trim();
+        let name = parts[1].trim();
+        let state = parts[2].trim();
+
+        if job_id.is_empty() || job_id.contains('.') {
+            continue;
+        }
+        if !seen.insert(job_id.to_string()) {
+            continue;
+        }
+        out_lines.push(format!("{}|{}|{}", job_id, name, state));
+        if out_lines.len() >= limit {
+            break;
+        }
+    }
+
+    out_lines.join("\n")
+}
+
+/// Resolve stdout path for a given job ID.
+pub fn resolve_job_stdout(job_id: &str) -> Result<String, String> {
+    fetch_job_stdout(job_id)
+}
+
+fn fetch_job_stdout(job_id: &str) -> Result<String, String> {
+    let raw = run_cmd(&["scontrol", "show", "job", job_id]);
+    if !raw.is_empty() && !raw.starts_with("Error") {
+        let fields = parse_scontrol(&raw);
+        if let Some(stdout) = fields.get("StdOut") {
+            if !stdout.is_empty() && stdout != "N/A" {
+                let job_name = fields.get("JobName").map(String::as_str).unwrap_or("");
+                return Ok(expand_stdout_path(stdout, job_id, job_name));
+            }
+        }
+    }
+
+    let raw = run_cmd(&[
+        "sacct",
+        "-j",
+        job_id,
+        "-X",
+        "-n",
+        "-P",
+        "-o",
+        "JobIDRaw,JobName,StdOut",
+    ]);
+    if raw.is_empty() || raw.starts_with("Error") {
+        return Err(format!("Unable to resolve StdOut for job {job_id}"));
+    }
+
+    for line in raw.lines() {
+        let parts: Vec<&str> = line.trim().split('|').collect();
+        if parts.len() < 3 {
+            continue;
+        }
+        let id = parts[0].trim();
+        let job_name = parts[1].trim();
+        let stdout = parts[2].trim();
+        if id == job_id && !stdout.is_empty() && stdout != "Unknown" && stdout != "N/A" {
+            return Ok(expand_stdout_path(stdout, job_id, job_name));
+        }
+    }
+
+    Err(format!("No StdOut configured for job {job_id}"))
+}
+
+fn expand_stdout_path(stdout: &str, job_id: &str, job_name: &str) -> String {
+    stdout
+        .replace("%j", job_id)
+        .replace("%A", job_id)
+        .replace("%x", job_name)
+}
+
 
 /// Submit a job via sbatch.
 pub fn submit_job(args: &str, cwd: &str) -> (bool, String, String) {

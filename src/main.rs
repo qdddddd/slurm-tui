@@ -175,6 +175,7 @@ fn handle_modal_key(app: &mut App, key: KeyEvent) {
                         app.open_log_view(&job_id);
                     }
                 }
+<<<<<<< HEAD
                 Some(ModalKind::Cancel) => {
                     let job_id = app
                         .modal
@@ -186,6 +187,8 @@ fn handle_modal_key(app: &mut App, key: KeyEvent) {
                         app.select_cancel_job(&job_id);
                     }
                 }
+=======
+>>>>>>> ec6b6fc (Use less for historical logs)
                 _ => {
                     if has_completions {
                         if let Some(ref mut modal) = app.modal {
@@ -232,7 +235,11 @@ fn handle_modal_key(app: &mut App, key: KeyEvent) {
         KeyCode::Up => {
             if let Some(ref mut m) = app.modal {
                 match m.kind {
+<<<<<<< HEAD
                     ModalKind::Logs | ModalKind::Cancel => {
+=======
+                    ModalKind::Logs => {
+>>>>>>> ec6b6fc (Use less for historical logs)
                         if m.selection > 1 {
                             m.selection -= 1;
                         }
@@ -251,7 +258,11 @@ fn handle_modal_key(app: &mut App, key: KeyEvent) {
         KeyCode::Down => {
             if let Some(ref mut m) = app.modal {
                 match m.kind {
+<<<<<<< HEAD
                     ModalKind::Logs | ModalKind::Cancel => {
+=======
+                    ModalKind::Logs => {
+>>>>>>> ec6b6fc (Use less for historical logs)
                         let max_selection = m.body_lines.len().saturating_sub(1);
                         if m.selection < max_selection {
                             m.selection += 1;
