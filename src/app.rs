@@ -64,8 +64,10 @@ impl App {
             self.flash_message(" Cancel Job ", "No jobs to cancel", MsgStyle::Yellow);
             return;
         }
-        let mut body: Vec<(String, BodyStyle)> =
-            vec![("Enter JobID or 'all' (Esc to cancel)".into(), BodyStyle::Dim)];
+        let mut body: Vec<(String, BodyStyle)> = vec![
+            ("Select a job ID (Up/Down, Enter, Esc to cancel)".into(), BodyStyle::Dim),
+            (format!("{:>8}  {:<20} {}", "all", "all jobs", "CANCEL"), BodyStyle::Red),
+        ];
         for line in output.lines() {
             let parts: Vec<&str> = line.trim().split('|').collect();
             if parts.len() >= 3 {
@@ -74,12 +76,11 @@ impl App {
                     "PENDING" => BodyStyle::Yellow,
                     _ => BodyStyle::Fg,
                 };
-                body.push((format!("  {:>8}  {:<20} {}", parts[0], parts[1], parts[2]), style));
+                body.push((format!("{:>8}  {:<20} {}", parts[0], parts[1], parts[2]), style));
             }
         }
-        let mut modal = Modal::new(ModalKind::Cancel, " Cancel Job ", ":cancel ").with_body(body);
-        let hist = self.history.get(" Cancel Job ");
-        modal.hist_index = hist.len();
+        let mut modal = Modal::new(ModalKind::Cancel, " Cancel Job ", "").with_body(body);
+        modal.selection = 1.min(modal.body_lines.len().saturating_sub(1));
         self.modal = Some(modal);
 
     }
@@ -129,6 +130,24 @@ impl App {
                 self.modal = None;
             }
             Err(err) => self.flash_message(" View Logs ", &err, MsgStyle::Red),
+        }
+    }
+
+    pub fn select_cancel_job(&mut self, job_id: &str) {
+        if job_id.eq_ignore_ascii_case("all") {
+            let body = vec![("This will cancel every job you own.".into(), BodyStyle::Red)];
+            let modal = Modal::new(ModalKind::CancelConfirm, " Cancel Job ", ":cancel ALL jobs? [y/N] ")
+                .with_body(body);
+            self.modal = Some(modal);
+            return;
+        }
+
+        let (ok, _, stderr) = slurm::cancel_job(job_id);
+        if ok {
+            self.dismiss_modal();
+            self.fetch_data();
+        } else {
+            self.flash_message(" Cancel Job ", &format!("Error: {stderr}"), MsgStyle::Red);
         }
     }
 

@@ -266,7 +266,7 @@ pub fn draw_modal(f: &mut Frame, area: Rect, modal: &Modal, p: &Palette) {
             BodyStyle::Fg => p.fg,
             BodyStyle::Red => p.red,
         };
-        let line_style = if matches!(modal.kind, ModalKind::Logs) && i == modal.selection {
+        let line_style = if matches!(modal.kind, ModalKind::Logs | ModalKind::Cancel) && i == modal.selection {
             Style::default().fg(p.aqua).add_modifier(Modifier::BOLD | Modifier::REVERSED)
         } else {
             Style::default().fg(color)
@@ -274,11 +274,11 @@ pub fn draw_modal(f: &mut Frame, area: Rect, modal: &Modal, p: &Palette) {
         lines.push(Line::from(Span::styled(text.as_str(), line_style)));
     }
 
-    if !modal.body_lines.is_empty() && !matches!(modal.kind, ModalKind::Logs) {
+    if !modal.body_lines.is_empty() && !matches!(modal.kind, ModalKind::Logs | ModalKind::Cancel) {
         lines.push(Line::from(""));
     }
 
-    if !matches!(modal.kind, ModalKind::Logs) {
+    if !matches!(modal.kind, ModalKind::Logs | ModalKind::Cancel) {
         if let Some((ref msg, ref style)) = modal.message {
             let color = match style {
                 MsgStyle::Green => p.green,
