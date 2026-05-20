@@ -13,13 +13,19 @@ use crate::slurm::{NodeInfo, QueueJob};
 
 pub fn draw(f: &mut Frame, app: &App) {
     let p = &app.palette;
+    // Grow the upper section so every cluster row fits (banner + header + rows),
+    // but keep at least 6 lines for the lower details section.
+    let nodes_required = app.data.node_infos.len() as u16 + 2;
+    let upper_min = 12u16;
+    let upper_max = f.area().height.saturating_sub(3 + 1 + 6).max(upper_min);
+    let upper_height = nodes_required.max(upper_min).min(upper_max);
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3),  // summary
-            Constraint::Length(12), // upper (jobs + nodes)
-            Constraint::Length(1),  // gap
-            Constraint::Min(0),    // lower (details / modal)
+            Constraint::Length(3),            // summary
+            Constraint::Length(upper_height), // upper (jobs + nodes)
+            Constraint::Length(1),            // gap
+            Constraint::Min(0),               // lower (details / modal)
         ])
         .split(f.area());
 
@@ -161,14 +167,14 @@ fn draw_jobs_table(f: &mut Frame, area: Rect, jobs: &[QueueJob], p: &Palette) {
     };
 
     let widths = [
-        Constraint::Length(10),
-        Constraint::Length(10),
-        Constraint::Length(16),
-        Constraint::Length(10),
-        Constraint::Length(12),
-        Constraint::Length(12),
-        Constraint::Length(3),
-        Constraint::Min(8),
+        Constraint::Length(18), // JobID
+        Constraint::Length(9),  // User
+        Constraint::Length(22), // Name
+        Constraint::Length(6), // Part
+        Constraint::Length(7), // State
+        Constraint::Length(8), // Time
+        Constraint::Length(2),  // N
+        Constraint::Min(8),     // NodeList
     ];
 
     let table = Table::new(rows, widths)
