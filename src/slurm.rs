@@ -102,12 +102,20 @@ pub struct QueueJob {
 }
 
 #[derive(Clone, Default)]
-pub struct NodeInfo {
+pub struct PartitionStats {
     pub partition: String,
-    pub avail: String,
-    pub nodes: String,
-    pub state: String,
-    pub nodelist: String,
+    pub total_nodes: u32,
+    pub idle_nodes: u32,
+    pub mix_nodes: u32,
+    pub alloc_nodes: u32,
+    pub down_nodes: u32,
+    pub other_nodes: u32,
+    pub cpu_idle: u64,
+    pub cpu_total: u64,
+    pub mem_free_mb: u64,
+    pub mem_total_mb: u64,
+    pub gpu_free: u64,
+    pub gpu_total: u64,
 }
 
 #[derive(Clone, Default)]
@@ -128,7 +136,11 @@ pub struct JobDetail {
 #[derive(Clone, Default)]
 pub struct SlurmData {
     pub queue_jobs: Vec<QueueJob>,
-    pub node_infos: Vec<NodeInfo>,
+    pub partition_stats: Vec<PartitionStats>,
+    pub idle_nodes: usize,
+    pub mix_nodes: usize,
+    pub alloc_nodes: usize,
+    pub down_nodes: usize,
     pub job_details: Vec<JobDetail>,
     pub running_total: usize,
 }
@@ -136,17 +148,17 @@ pub struct SlurmData {
 // ── Fetching ──
 
 pub fn fetch_all(max_jobs: usize, login_node: &str) -> SlurmData {
-    // Run squeue and sinfo in parallel
+    // Run squeue and scontrol in parallel
     let login1 = login_node.to_string();
     let squeue_handle = thread::spawn(move || {
         run_cmd(&["squeue", "-h", "-o", "%i|%u|%j|%P|%T|%M|%D|%R"])
     });
-    let sinfo_handle = thread::spawn(|| {
-        run_cmd(&["sinfo", "-h", "-o", "%P|%a|%D|%t|%N"])
+    let scontrol_handle = thread::spawn(|| {
+        run_cmd(&["scontrol", "-d", "-o", "show", "node"])
     });
 
     let squeue_out = squeue_handle.join().unwrap_or_default();
-    let sinfo_out = sinfo_handle.join().unwrap_or_default();
+    let scontrol_out = scontrol_handle.join().unwrap_or_default();
 
     // Parse queue jobs
     let mut queue_jobs = Vec::new();
@@ -174,22 +186,8 @@ pub fn fetch_all(max_jobs: usize, login_node: &str) -> SlurmData {
         }
     }
 
-    // Parse node info
-    let mut node_infos = Vec::new();
-    if !sinfo_out.is_empty() && !sinfo_out.starts_with("Error") {
-        for line in sinfo_out.lines() {
-            let parts: Vec<&str> = line.trim().split('|').collect();
-            if parts.len() >= 5 {
-                node_infos.push(NodeInfo {
-                    partition: parts[0].to_string(),
-                    avail: parts[1].to_string(),
-                    nodes: parts[2].to_string(),
-                    state: parts[3].to_string(),
-                    nodelist: parts[4].to_string(),
-                });
-            }
-        }
-    }
+    let (partition_stats, idle_nodes, mix_nodes, alloc_nodes, down_nodes) =
+        parse_node_stats(&scontrol_out);
 
     // Sort running jobs: current user first
     let current_user = std::env::var("USER").unwrap_or_default();
@@ -293,10 +291,177 @@ pub fn fetch_all(max_jobs: usize, login_node: &str) -> SlurmData {
 
     SlurmData {
         queue_jobs,
-        node_infos,
+        partition_stats,
+        idle_nodes,
+        mix_nodes,
+        alloc_nodes,
+        down_nodes,
         job_details,
         running_total,
     }
+}
+
+#[derive(Default)]
+struct PartitionStatsAccum {
+    total_nodes: u32,
+    idle_nodes: u32,
+    mix_nodes: u32,
+    alloc_nodes: u32,
+    down_nodes: u32,
+    other_nodes: u32,
+    cpu_idle: u64,
+    cpu_total: u64,
+    mem_free_mb: u64,
+    mem_total_mb: u64,
+    gpu_free: u64,
+    gpu_total: u64,
+}
+
+enum StateCat {
+    Idle,
+    Mix,
+    Alloc,
+    Down,
+    Other,
+}
+
+fn categorize_state(state: &str) -> StateCat {
+    let st = state.to_uppercase();
+    if st.contains("DRAIN")
+        || st.contains("DOWN")
+        || st.contains("FAIL")
+        || st.contains("NOT_RESPOND")
+        || st.contains("MAINT")
+        || st.contains("POWER_DOWN")
+        || st.contains("POWERED_DOWN")
+    {
+        StateCat::Down
+    } else if st.contains("MIX") {
+        StateCat::Mix
+    } else if st.contains("ALLOCATED") {
+        StateCat::Alloc
+    } else if st.contains("IDLE") {
+        StateCat::Idle
+    } else {
+        StateCat::Other
+    }
+}
+
+fn parse_gres_count(gres: &str, kind: &str) -> u64 {
+    if gres.is_empty() || gres == "(null)" {
+        return 0;
+    }
+    let mut total = 0u64;
+    for item in gres.split(',') {
+        let item = item.split('(').next().unwrap_or(item).trim();
+        if item.is_empty() {
+            continue;
+        }
+        let parts: Vec<&str> = item.split(':').collect();
+        if parts.is_empty() || parts[0] != kind {
+            continue;
+        }
+        if let Some(last) = parts.last() {
+            if let Ok(n) = last.parse::<u64>() {
+                total += n;
+            }
+        }
+    }
+    total
+}
+
+fn parse_node_stats(
+    raw: &str,
+) -> (Vec<PartitionStats>, usize, usize, usize, usize) {
+    if raw.is_empty() || raw.starts_with("Error") {
+        return (Vec::new(), 0, 0, 0, 0);
+    }
+
+    let mut per_partition: HashMap<String, PartitionStatsAccum> = HashMap::new();
+    let mut idle_nodes = 0usize;
+    let mut mix_nodes = 0usize;
+    let mut alloc_nodes = 0usize;
+    let mut down_nodes = 0usize;
+
+    for line in raw.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let fields = parse_scontrol(line);
+        let partitions = match fields.get("Partitions") {
+            Some(p) if !p.is_empty() => p.clone(),
+            _ => continue,
+        };
+        let state = fields.get("State").cloned().unwrap_or_default();
+        let cpu_alloc: u64 = fields.get("CPUAlloc").and_then(|s| s.parse().ok()).unwrap_or(0);
+        let cpu_tot: u64 = fields.get("CPUTot").and_then(|s| s.parse().ok()).unwrap_or(0);
+        let mem_tot: u64 = fields.get("RealMemory").and_then(|s| s.parse().ok()).unwrap_or(0);
+        let mem_alloc: u64 = fields.get("AllocMem").and_then(|s| s.parse().ok()).unwrap_or(0);
+        let gres = fields.get("Gres").cloned().unwrap_or_default();
+        let gres_used = fields.get("GresUsed").cloned().unwrap_or_default();
+
+        let cpu_idle = cpu_tot.saturating_sub(cpu_alloc);
+        let mem_free_mb = mem_tot.saturating_sub(mem_alloc);
+        let gpu_total = parse_gres_count(&gres, "gpu");
+        let gpu_used = parse_gres_count(&gres_used, "gpu");
+        let gpu_free = gpu_total.saturating_sub(gpu_used);
+
+        let category = categorize_state(&state);
+        match category {
+            StateCat::Idle => idle_nodes += 1,
+            StateCat::Mix => mix_nodes += 1,
+            StateCat::Alloc => alloc_nodes += 1,
+            StateCat::Down => down_nodes += 1,
+            StateCat::Other => {}
+        }
+        // Down nodes are unusable; don't count their resources as free.
+        let counts_as_free = !matches!(category, StateCat::Down);
+
+        for partition in partitions.split(',').filter(|s| !s.is_empty()) {
+            let entry = per_partition
+                .entry(partition.to_string())
+                .or_default();
+            entry.total_nodes += 1;
+            match category {
+                StateCat::Idle => entry.idle_nodes += 1,
+                StateCat::Mix => entry.mix_nodes += 1,
+                StateCat::Alloc => entry.alloc_nodes += 1,
+                StateCat::Down => entry.down_nodes += 1,
+                StateCat::Other => entry.other_nodes += 1,
+            }
+            entry.cpu_total += cpu_tot;
+            entry.mem_total_mb += mem_tot;
+            entry.gpu_total += gpu_total;
+            if counts_as_free {
+                entry.cpu_idle += cpu_idle;
+                entry.mem_free_mb += mem_free_mb;
+                entry.gpu_free += gpu_free;
+            }
+        }
+    }
+
+    let mut stats: Vec<PartitionStats> = per_partition
+        .into_iter()
+        .map(|(name, a)| PartitionStats {
+            partition: name,
+            total_nodes: a.total_nodes,
+            idle_nodes: a.idle_nodes,
+            mix_nodes: a.mix_nodes,
+            alloc_nodes: a.alloc_nodes,
+            down_nodes: a.down_nodes,
+            other_nodes: a.other_nodes,
+            cpu_idle: a.cpu_idle,
+            cpu_total: a.cpu_total,
+            mem_free_mb: a.mem_free_mb,
+            mem_total_mb: a.mem_total_mb,
+            gpu_free: a.gpu_free,
+            gpu_total: a.gpu_total,
+        })
+        .collect();
+    stats.sort_by(|a, b| a.partition.cmp(&b.partition));
+
+    (stats, idle_nodes, mix_nodes, alloc_nodes, down_nodes)
 }
 
 fn parse_scontrol(raw: &str) -> HashMap<String, String> {
